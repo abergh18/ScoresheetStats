@@ -35,9 +35,9 @@ PITCHING_STAT_MAP = {
 }
 
 
-def _api_get(path: str, params: dict[str, Any]) -> dict[str, Any]:
+def _api_get(params: dict[str, Any]) -> dict[str, Any]:
     query = urlencode(params)
-    url = f"{MLB_API_BASE}{path}?{query}"
+    url = f"{MLB_API_BASE}{"/people"}?{query}"
     with urlopen(url, timeout=30) as response:
         return json.loads(response.read().decode("utf-8"))
 
@@ -60,7 +60,6 @@ def fetch_player_metadata(player_ids: tuple[int, ...]) -> pd.DataFrame:
         return pd.DataFrame()
 
     data = _api_get(
-        "/people",
         {
             "personIds": ",".join(str(x) for x in player_ids),
             "hydrate": "currentTeam,rosterEntries",
@@ -100,34 +99,32 @@ def fetch_stats(
     if not player_ids:
         return pd.DataFrame()
 
-    params: dict[str, Any] = {
-        "group": group,
-        "personIds": ",".join(str(x) for x in player_ids),
-        "sportIds": 1,
-    }
-
     today = dt.date.today()
     if period_key == "full":
-        params["stats"] = "season"
-        params["season"] = season_year
+        hydrate_stats = f"stats(group=[{group}],type=[season],season={season_year})"
     elif period_key == "last_season":
-        params["stats"] = "season"
-        params["season"] = season_year - 1
+        hydrate_stats = f"stats(group=[{group}],type=[season],season={season_year - 1})"
     elif period_key == "last_15":
-        params["stats"] = "byDateRange"
-        params["startDate"] = (today - dt.timedelta(days=15)).isoformat()
-        params["endDate"] = today.isoformat()
+        start = (today - dt.timedelta(days=15)).isoformat()
+        end = today.isoformat()
+        hydrate_stats = f"stats(group=[{group}],type=[byDateRange],startDate={start},endDate={end})"
     elif period_key == "last_30":
-        params["stats"] = "byDateRange"
-        params["startDate"] = (today - dt.timedelta(days=30)).isoformat()
-        params["endDate"] = today.isoformat()
+        start = (today - dt.timedelta(days=30)).isoformat()
+        end = today.isoformat()
+        hydrate_stats = f"stats(group=[{group}],type=[byDateRange],startDate={start},endDate={end})"
     else:
         raise ValueError(f"Unsupported period: {period_key}")
 
-    data = _api_get("/stats", params)
+    params: dict[str, Any] = {
+        "personIds": ",".join(str(x) for x in player_ids),
+        "hydrate": hydrate_stats,
+    }    
+
+    data = _api_get(params)
     splits = []
-    for group_stats in data.get("stats", []):
-        splits.extend(group_stats.get("splits", []))
+    for person_stats in data.get("people", []) or []:
+        for group_stats in person_stats.get("stats", []):
+            splits.extend(group_stats.get("splits", []))
 
     rows: list[dict[str, Any]] = []
     for split in splits:
