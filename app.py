@@ -14,8 +14,8 @@ MLB_API_BASE = "https://statsapi.mlb.com/api/v1"
 HITTING_STAT_MAP = {
     "AB": "atBats",
     "AVG": "avg",
-    "OBP": "onBasePercentage",
-    "SLG": "sluggingPercentage",
+    "OBP": "obp",
+    "SLG": "slg",
     "OPS": "ops",
     "HR": "homeRuns",
     "SB": "stolenBases",
@@ -30,7 +30,7 @@ PITCHING_STAT_MAP = {
     "WHIP": "whip",
     "AVG": "avg",
     "K/9": "strikeoutsPer9Inn",
-    "BB/9": "baseOnBallsPer9Inn",
+    "BB/9": "walksPer9Inn",
     "K/BB": "strikeoutWalkRatio",
 }
 
