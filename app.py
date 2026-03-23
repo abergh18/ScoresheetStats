@@ -160,7 +160,7 @@ def fetch_player_metadata(player_ids: tuple[int, ...]) -> pd.DataFrame:
                 "Position": (person.get("primaryPosition") or {}).get("abbreviation", "N/A"),
                 "Position Type": position_type,
                 "Bats/Throws": handedness or "N/A",
-                "Team": (person.get("currentTeam") or {}).get("abbreviation", "N/A"),
+                "Team": (active_entry.get("team") or {}).get("abbreviation", "N/A"),
                 "Status": status,
             }
         )
