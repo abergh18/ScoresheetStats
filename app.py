@@ -367,9 +367,6 @@ def render_filters_and_table(df: pd.DataFrame, key_prefix: str) -> None:
     with c3:
         filtered = render_numeric_filters(filtered, key_prefix)
 
-    st.caption(
-        "Tip: use the popover filters for positions, statuses, and numeric stat ranges, then click any column header to sort."
-    )
     st.dataframe(filtered, hide_index=True, use_container_width=True)
 
 
