@@ -63,6 +63,7 @@ def fetch_player_metadata(player_ids: tuple[int, ...]) -> pd.DataFrame:
         {
             "personIds": ",".join(str(x) for x in player_ids),
             "hydrate": "currentTeam,rosterEntries",
+            "appContext": "majorLeague",
         },
     )
 
@@ -107,18 +108,22 @@ def fetch_stats(
     elif period_key == "last_15":
         start = (today - dt.timedelta(days=15)).isoformat()
         end = today.isoformat()
-        hydrate_stats = f"stats(group=[{group}],type=[byDateRange],startDate={start},endDate={end})"
+        hydrate_stats = (
+            f"stats(group=[{group}],type=[byDateRange],startDate={start},endDate={end})"
+        )
     elif period_key == "last_30":
         start = (today - dt.timedelta(days=30)).isoformat()
         end = today.isoformat()
-        hydrate_stats = f"stats(group=[{group}],type=[byDateRange],startDate={start},endDate={end})"
+        hydrate_stats = (
+            f"stats(group=[{group}],type=[byDateRange],startDate={start},endDate={end})"
+        )
     else:
         raise ValueError(f"Unsupported period: {period_key}")
 
     params: dict[str, Any] = {
         "personIds": ",".join(str(x) for x in player_ids),
         "hydrate": hydrate_stats,
-    }    
+    }
 
     data = _api_get(params)
     splits = []
@@ -130,11 +135,29 @@ def fetch_stats(
     for split in splits:
         player = split.get("player") or {}
         stat = split.get("stat") or {}
-        row = {"player_id": int(player.get("id", 0))}
+        team = split.get("team") or {}
+        row = {
+            "player_id": int(player.get("id", 0)),
+            "stat_team_name": team.get("name", ""),
+        }
         row.update(stat)
         rows.append(row)
 
-    return pd.DataFrame(rows)
+    stat_df = pd.DataFrame(rows)
+    if stat_df.empty:
+        return stat_df
+
+    stat_df["is_full_season_total"] = stat_df["stat_team_name"].eq("")
+    preferred_rows = (
+        stat_df.sort_values(
+            by=["player_id", "is_full_season_total"],
+            ascending=[True, False],
+            kind="stable",
+        )
+        .drop_duplicates(subset=["player_id"], keep="first")
+        .drop(columns=["stat_team_name", "is_full_season_total"], errors="ignore")
+    )
+    return preferred_rows
 
 
 def build_stats_table(
@@ -156,32 +179,59 @@ def build_stats_table(
     return out
 
 
+def set_filter_values(state_key: str, options: list[str], selected: bool) -> None:
+    for option in options:
+        st.session_state[f"{state_key}__{option}"] = selected
+
+
+def reset_filter_state(filter_prefixes: list[str]) -> None:
+    keys_to_remove = [
+        key
+        for key in st.session_state.keys()
+        if any(key == prefix or key.startswith(f"{prefix}__") for prefix in filter_prefixes)
+    ]
+    for key in keys_to_remove:
+        st.session_state.pop(key, None)
+
+
 def render_checkbox_filter(label: str, options: list[str], state_key: str) -> list[str]:
     if not options:
         return []
 
-    if state_key not in st.session_state:
-        st.session_state[state_key] = options.copy()
-    else:
-        st.session_state[state_key] = [
-            value for value in st.session_state[state_key] if value in options
-        ]
+    for option in options:
+        widget_key = f"{state_key}__{option}"
+        if widget_key not in st.session_state:
+            st.session_state[widget_key] = True
 
-    with st.expander(label):
+    selected_count = sum(
+        1 for option in options if st.session_state.get(f"{state_key}__{option}", False)
+    )
+
+    with st.popover(f"{label} ({selected_count}/{len(options)})", use_container_width=True):
         control_cols = st.columns(2)
-        if control_cols[0].button("Select all", key=f"{state_key}_all", use_container_width=True):
-            st.session_state[state_key] = options.copy()
-        if control_cols[1].button("Clear all", key=f"{state_key}_none", use_container_width=True):
-            st.session_state[state_key] = []
+        control_cols[0].button(
+            "Select all",
+            key=f"{state_key}_all",
+            use_container_width=True,
+            on_click=set_filter_values,
+            args=(state_key, options, True),
+        )
+        control_cols[1].button(
+            "Clear all",
+            key=f"{state_key}_none",
+            use_container_width=True,
+            on_click=set_filter_values,
+            args=(state_key, options, False),
+        )
 
-        selected_values: list[str] = []
         for option in options:
-            checked = option in st.session_state[state_key]
-            if st.checkbox(option, value=checked, key=f"{state_key}_{option}"):
-                selected_values.append(option)
-        st.session_state[state_key] = selected_values
+            st.checkbox(option, key=f"{state_key}__{option}")
 
-    return st.session_state[state_key]
+    selected_values = [
+        option for option in options if st.session_state.get(f"{state_key}__{option}", False)
+    ]
+    st.session_state[state_key] = selected_values
+    return selected_values
 
 
 def render_filters_and_table(df: pd.DataFrame, key_prefix: str) -> None:
@@ -195,23 +245,24 @@ def render_filters_and_table(df: pd.DataFrame, key_prefix: str) -> None:
     c1, c2 = st.columns(2)
     with c1:
         selected_positions = render_checkbox_filter(
-            "Filter by position",
+            "Position",
             positions,
             f"{key_prefix}_positions",
         )
     with c2:
         selected_statuses = render_checkbox_filter(
-            "Filter by status",
+            "Status",
             statuses,
             f"{key_prefix}_statuses",
         )
 
     filtered = df[
-        df["Position"].isin(selected_positions)
-        & df["Status"].isin(selected_statuses)
+        df["Position"].isin(selected_positions) & df["Status"].isin(selected_statuses)
     ]
 
-    st.caption("Tip: expand a filter to check or uncheck values, then click any column header to sort.")
+    st.caption(
+        "Tip: use the filter popovers to check or uncheck values, then click any column header to sort."
+    )
     st.dataframe(filtered, hide_index=True, use_container_width=True)
 
 
@@ -267,13 +318,17 @@ def main() -> None:
         pitcher_positions = metadata[metadata["Position Type"] == "Pitcher"]["player_id"].tolist()
 
         if hitter_positions:
-            hitting_table = hitting_table[hitting_table["Name"].isin(
-                metadata[metadata["player_id"].isin(hitter_positions)]["Name"]
-            )]
+            hitting_table = hitting_table[
+                hitting_table["Name"].isin(
+                    metadata[metadata["player_id"].isin(hitter_positions)]["Name"]
+                )
+            ]
         if pitcher_positions:
-            pitching_table = pitching_table[pitching_table["Name"].isin(
-                metadata[metadata["player_id"].isin(pitcher_positions)]["Name"]
-            )]
+            pitching_table = pitching_table[
+                pitching_table["Name"].isin(
+                    metadata[metadata["player_id"].isin(pitcher_positions)]["Name"]
+                )
+            ]
 
         st.session_state["loaded_stats"] = {
             "period_name": selected_period_name,
@@ -281,13 +336,14 @@ def main() -> None:
             "pitching_table": pitching_table,
         }
 
-        for filter_key in [
-            "hitting_positions",
-            "hitting_statuses",
-            "pitching_positions",
-            "pitching_statuses",
-        ]:
-            st.session_state.pop(filter_key, None)
+        reset_filter_state(
+            [
+                "hitting_positions",
+                "hitting_statuses",
+                "pitching_positions",
+                "pitching_statuses",
+            ]
+        )
 
     loaded_stats = st.session_state.get("loaded_stats")
     if loaded_stats:
