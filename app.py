@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import datetime as dt
 import json
+from pathlib import Path
 from typing import Any
 from urllib.parse import urlencode
 from urllib.request import urlopen
@@ -11,6 +12,7 @@ import streamlit as st
 
 MLB_API_BASE = "https://statsapi.mlb.com/api/v1"
 PLAYER_IDS_QUERY_PARAM = "player_ids"
+APP_STATE_PATH = Path.home() / ".scoresheet_stats_state.json"
 
 HITTING_STAT_MAP = {
     "AB": "atBats",
@@ -43,25 +45,58 @@ def _api_get(params: dict[str, Any]) -> dict[str, Any]:
         return json.loads(response.read().decode("utf-8"))
 
 
+@st.cache_data(show_spinner=False)
+def load_saved_state() -> dict[str, str]:
+    if not APP_STATE_PATH.exists():
+        return {}
+
+    try:
+        saved_state = json.loads(APP_STATE_PATH.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+
+    if not isinstance(saved_state, dict):
+        return {}
+
+    return {
+        "player_ids": str(saved_state.get("player_ids", "")),
+        "period_name": str(saved_state.get("period_name", "Full Season")),
+    }
+
+
 def get_saved_player_ids() -> str:
     query_params = getattr(st, "query_params", None)
     if query_params is not None:
         saved_ids = query_params.get(PLAYER_IDS_QUERY_PARAM, "")
         if isinstance(saved_ids, list):
-            return saved_ids[0] if saved_ids else ""
-        return str(saved_ids)
+            query_saved_ids = saved_ids[0] if saved_ids else ""
+        else:
+            query_saved_ids = str(saved_ids)
+        if query_saved_ids:
+            return query_saved_ids
 
     getter = getattr(st, "experimental_get_query_params", None)
-    if getter is None:
-        return ""
+    if getter is not None:
+        saved_ids = getter().get(PLAYER_IDS_QUERY_PARAM, [""])
+        if saved_ids and saved_ids[0]:
+            return saved_ids[0]
 
-    saved_ids = getter().get(PLAYER_IDS_QUERY_PARAM, [""])
-    return saved_ids[0] if saved_ids else ""
+    return load_saved_state().get("player_ids", "")
 
 
 
-def save_player_ids(raw_ids: str) -> None:
+def save_app_state(raw_ids: str, period_name: str) -> None:
     compact_ids = ",".join(x.strip() for x in raw_ids.replace("\n", ",").split(",") if x.strip())
+    state_payload = {
+        "player_ids": compact_ids,
+        "period_name": period_name,
+    }
+    try:
+        APP_STATE_PATH.write_text(json.dumps(state_payload), encoding="utf-8")
+        load_saved_state.clear()
+    except OSError:
+        pass
+
     query_params = getattr(st, "query_params", None)
     if query_params is not None:
         if compact_ids:
@@ -113,13 +148,19 @@ def fetch_player_metadata(player_ids: tuple[int, ...]) -> pd.DataFrame:
         if not status:
             status = "Active" if person.get("active") else "Unknown"
 
+        bat_side = (person.get("batSide") or {}).get("code", "")
+        pitch_hand = (person.get("pitchHand") or {}).get("code", "")
+        position_type = (person.get("primaryPosition") or {}).get("type", "Unknown")
+        handedness = pitch_hand if position_type == "Pitcher" else bat_side
+
         rows.append(
             {
                 "player_id": int(person["id"]),
                 "Name": person.get("fullName", "Unknown"),
                 "Position": (person.get("primaryPosition") or {}).get("abbreviation", "N/A"),
-                "Position Type": (person.get("primaryPosition") or {}).get("type", "Unknown"),
-                "Team": (person.get("currentTeam") or {}).get("name", "N/A"),
+                "Position Type": position_type,
+                "Bats/Throws": handedness or "N/A",
+                "Team": (active_entry.get("team") or {}).get("abbreviation", "N/A"),
                 "Status": status,
             }
         )
@@ -222,11 +263,62 @@ def build_stats_table(
     if not stat_df.empty:
         merged = merged.merge(stat_df, on="player_id", how="left")
 
-    out = merged[["player_id", "Name", "Position", "Team", "Status"]].copy()
+    out = merged[["player_id", "Name", "Position", "Bats/Throws", "Team", "Status"]].copy()
     for label, key in stat_map.items():
         out[label] = merged[key] if key in merged.columns else ""
 
     return coerce_numeric_columns(out, list(stat_map.keys()))
+
+
+
+def load_stats(
+    player_ids: list[int],
+    selected_period: str,
+    selected_period_name: str,
+    season_year: int,
+) -> None:
+    player_tuple = tuple(player_ids)
+    metadata = fetch_player_metadata(player_tuple)
+    hitting_stats = fetch_stats(player_tuple, "hitting", selected_period, season_year)
+    pitching_stats = fetch_stats(player_tuple, "pitching", selected_period, season_year)
+
+    hitting_table = build_stats_table(metadata, hitting_stats, HITTING_STAT_MAP)
+    pitching_table = build_stats_table(metadata, pitching_stats, PITCHING_STAT_MAP)
+
+    hitter_positions = metadata[metadata["Position Type"] != "Pitcher"]["player_id"].tolist()
+    pitcher_positions = metadata[metadata["Position Type"] == "Pitcher"]["player_id"].tolist()
+
+    if hitter_positions:
+        hitting_table = hitting_table[
+            hitting_table["Name"].isin(
+                metadata[metadata["player_id"].isin(hitter_positions)]["Name"]
+            )
+        ]
+    if pitcher_positions:
+        pitching_table = pitching_table[
+            pitching_table["Name"].isin(
+                metadata[metadata["player_id"].isin(pitcher_positions)]["Name"]
+            )
+        ]
+
+    st.session_state["loaded_stats"] = {
+        "period_name": selected_period_name,
+        "hitting_table": hitting_table,
+        "pitching_table": pitching_table,
+    }
+
+    reset_filter_state(
+        [
+            "hitting_positions",
+            "hitting_statuses",
+            "hitting_min",
+            "hitting_max",
+            "pitching_positions",
+            "pitching_statuses",
+            "pitching_min",
+            "pitching_max",
+        ]
+    )
 
 
 
@@ -379,6 +471,7 @@ def main() -> None:
         "Enter your MLB player IDs to get hitting and pitching stats, status, and sortable filters."
     )
 
+    saved_state = load_saved_state()
     default_ids = st.session_state.get("saved_player_ids", get_saved_player_ids())
     raw_ids = st.text_area(
         "MLB player IDs (comma-separated or one per line)",
@@ -394,13 +487,25 @@ def main() -> None:
         "Last 15 Days": "last_15",
         "Last 30 Days": "last_30",
     }
-    selected_period_name = st.selectbox("Stat time window", options=list(period_options.keys()))
+    default_period_name = saved_state.get("period_name", "Full Season")
+    default_period_index = (
+        list(period_options.keys()).index(default_period_name)
+        if default_period_name in period_options
+        else 0
+    )
+    selected_period_name = st.selectbox(
+        "Stat time window",
+        options=list(period_options.keys()),
+        index=default_period_index,
+    )
     selected_period = period_options[selected_period_name]
 
     today = dt.date.today()
     season_year = today.year
 
-    if st.button("Load Stats", type="primary"):
+    should_load_stats = st.button("Load Stats", type="primary")
+
+    if should_load_stats:
         try:
             player_ids = parse_player_ids(raw_ids)
         except ValueError as exc:
@@ -411,52 +516,21 @@ def main() -> None:
             st.warning("Please enter at least one MLB player ID.")
             return
 
-        save_player_ids(raw_ids)
+        save_app_state(raw_ids, selected_period_name)
         st.session_state["saved_player_ids"] = raw_ids
 
         with st.spinner("Fetching player metadata and stats from MLB..."):
-            player_tuple = tuple(player_ids)
-            metadata = fetch_player_metadata(player_tuple)
-            hitting_stats = fetch_stats(player_tuple, "hitting", selected_period, season_year)
-            pitching_stats = fetch_stats(player_tuple, "pitching", selected_period, season_year)
+            load_stats(player_ids, selected_period, selected_period_name, season_year)
 
-        hitting_table = build_stats_table(metadata, hitting_stats, HITTING_STAT_MAP)
-        pitching_table = build_stats_table(metadata, pitching_stats, PITCHING_STAT_MAP)
+    elif raw_ids and "loaded_stats" not in st.session_state:
+        try:
+            player_ids = parse_player_ids(raw_ids)
+        except ValueError:
+            player_ids = []
 
-        hitter_positions = metadata[metadata["Position Type"] != "Pitcher"]["player_id"].tolist()
-        pitcher_positions = metadata[metadata["Position Type"] == "Pitcher"]["player_id"].tolist()
-
-        if hitter_positions:
-            hitting_table = hitting_table[
-                hitting_table["Name"].isin(
-                    metadata[metadata["player_id"].isin(hitter_positions)]["Name"]
-                )
-            ]
-        if pitcher_positions:
-            pitching_table = pitching_table[
-                pitching_table["Name"].isin(
-                    metadata[metadata["player_id"].isin(pitcher_positions)]["Name"]
-                )
-            ]
-
-        st.session_state["loaded_stats"] = {
-            "period_name": selected_period_name,
-            "hitting_table": hitting_table,
-            "pitching_table": pitching_table,
-        }
-
-        reset_filter_state(
-            [
-                "hitting_positions",
-                "hitting_statuses",
-                "hitting_min",
-                "hitting_max",
-                "pitching_positions",
-                "pitching_statuses",
-                "pitching_min",
-                "pitching_max",
-            ]
-        )
+        if player_ids:
+            with st.spinner("Loading saved player stats..."):
+                load_stats(player_ids, selected_period, selected_period_name, season_year)
 
     loaded_stats = st.session_state.get("loaded_stats")
     if loaded_stats:
