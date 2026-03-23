@@ -37,7 +37,7 @@ PITCHING_STAT_MAP = {
 
 def _api_get(params: dict[str, Any]) -> dict[str, Any]:
     query = urlencode(params)
-    url = f"{MLB_API_BASE}{"/people"}?{query}"
+    url = f"{MLB_API_BASE}/people?{query}"
     with urlopen(url, timeout=30) as response:
         return json.loads(response.read().decode("utf-8"))
 
@@ -156,6 +156,34 @@ def build_stats_table(
     return out
 
 
+def render_checkbox_filter(label: str, options: list[str], state_key: str) -> list[str]:
+    if not options:
+        return []
+
+    if state_key not in st.session_state:
+        st.session_state[state_key] = options.copy()
+    else:
+        st.session_state[state_key] = [
+            value for value in st.session_state[state_key] if value in options
+        ]
+
+    with st.expander(label):
+        control_cols = st.columns(2)
+        if control_cols[0].button("Select all", key=f"{state_key}_all", use_container_width=True):
+            st.session_state[state_key] = options.copy()
+        if control_cols[1].button("Clear all", key=f"{state_key}_none", use_container_width=True):
+            st.session_state[state_key] = []
+
+        selected_values: list[str] = []
+        for option in options:
+            checked = option in st.session_state[state_key]
+            if st.checkbox(option, value=checked, key=f"{state_key}_{option}"):
+                selected_values.append(option)
+        st.session_state[state_key] = selected_values
+
+    return st.session_state[state_key]
+
+
 def render_filters_and_table(df: pd.DataFrame, key_prefix: str) -> None:
     if df.empty:
         st.info("No player data found for this selection.")
@@ -166,18 +194,16 @@ def render_filters_and_table(df: pd.DataFrame, key_prefix: str) -> None:
 
     c1, c2 = st.columns(2)
     with c1:
-        selected_positions = st.multiselect(
+        selected_positions = render_checkbox_filter(
             "Filter by position",
-            options=positions,
-            default=positions,
-            key=f"{key_prefix}_positions",
+            positions,
+            f"{key_prefix}_positions",
         )
     with c2:
-        selected_statuses = st.multiselect(
+        selected_statuses = render_checkbox_filter(
             "Filter by status",
-            options=statuses,
-            default=statuses,
-            key=f"{key_prefix}_statuses",
+            statuses,
+            f"{key_prefix}_statuses",
         )
 
     filtered = df[
@@ -185,7 +211,7 @@ def render_filters_and_table(df: pd.DataFrame, key_prefix: str) -> None:
         & df["Status"].isin(selected_statuses)
     ]
 
-    st.caption("Tip: click any column header to sort ascending/descending.")
+    st.caption("Tip: expand a filter to check or uncheck values, then click any column header to sort.")
     st.dataframe(filtered, hide_index=True, use_container_width=True)
 
 
@@ -249,15 +275,31 @@ def main() -> None:
                 metadata[metadata["player_id"].isin(pitcher_positions)]["Name"]
             )]
 
+        st.session_state["loaded_stats"] = {
+            "period_name": selected_period_name,
+            "hitting_table": hitting_table,
+            "pitching_table": pitching_table,
+        }
+
+        for filter_key in [
+            "hitting_positions",
+            "hitting_statuses",
+            "pitching_positions",
+            "pitching_statuses",
+        ]:
+            st.session_state.pop(filter_key, None)
+
+    loaded_stats = st.session_state.get("loaded_stats")
+    if loaded_stats:
         t1, t2 = st.tabs(["Hitters", "Pitchers"])
 
         with t1:
-            st.subheader(f"Hitting stats: {selected_period_name}")
-            render_filters_and_table(hitting_table, "hitting")
+            st.subheader(f"Hitting stats: {loaded_stats['period_name']}")
+            render_filters_and_table(loaded_stats["hitting_table"], "hitting")
 
         with t2:
-            st.subheader(f"Pitching stats: {selected_period_name}")
-            render_filters_and_table(pitching_table, "pitching")
+            st.subheader(f"Pitching stats: {loaded_stats['period_name']}")
+            render_filters_and_table(loaded_stats["pitching_table"], "pitching")
 
 
 if __name__ == "__main__":
