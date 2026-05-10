@@ -206,16 +206,19 @@ def fetch_stats(
     data = _api_get(params)
     splits = []
     for person_stats in data.get("people", []) or []:
+        player_id = person_stats.get("id", [])
+
         for group_stats in person_stats.get("stats", []):
-            splits.extend(group_stats.get("splits", []))
+            for split in group_stats.get("splits", []) or []:
+                split["player_id"] = player_id
+                splits.append(split)
 
     rows: list[dict[str, Any]] = []
     for split in splits:
-        player = split.get("player") or {}
         stat = split.get("stat") or {}
         team = split.get("team") or {}
         row = {
-            "player_id": int(player.get("id", 0)),
+            "player_id": split["player_id"],
             "stat_team_name": team.get("name", ""),
         }
         row.update(stat)
